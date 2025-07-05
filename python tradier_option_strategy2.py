@@ -1,13 +1,13 @@
 """
-QQQM Iron‑Condor bot – Tradier sandbox (paper) account
+QQQ Iron‑Condor bot – Tradier sandbox (paper) account
 ----------------------------------------------------
-• פותח איירון‑קונדו יומי 3 דקות לאחר פתיחת השוק (09:33 ET)
-• גידור דלתא במניות QQQM לפי רמות Δ 0.70 → 0.85 → 1.00 (עד 100 מניות)
-• סגירה אוטומטית ברווח ≥ 75 % או הפסד ≥ 90 % מהקרדיט הראשוני
-• Fail‑Safe: סגירה גורפת ב‑15:40 ET
+• פותח איירון‑קונדו יומי 3 דקות לאחר פתיחת השוק (09:33 ET)
+• גידור דלתא במניות QQQ לפי רמות Δ 0.70 → 0.85 → 1.00 (עד 100 מניות)
+• סגירה אוטומטית ברווח ≥ 75 % או הפסד ≥ 90 % מהקרדיט הראשוני
+• Fail‑Safe: סגירה גורפת ב‑15:40 ET
 • יומן עסקאות נשמר בזיכרון בלבד (trade_log)
 
-‒ נכתב עבור חשבון הסאנדבוקס של Tradier – החלף TOKEN ו‑ACCOUNT_ID לחשבון Live.
+‒ נכתב עבור חשבון הסאנדבוקס של Tradier – החלף TOKEN ו‑ACCOUNT_ID לחשבון Live.
 """
 
 from __future__ import annotations
@@ -25,12 +25,12 @@ TOKEN      = "MeZYc0JGI4iFdTeGUA4mv6JsTAYd"  # sandbox
 BASE_URL   = "https://sandbox.tradier.com/v1"
 HEADERS    = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/json"}
 
-UNDERLYING       = "QQQM"
+UNDERLYING       = "QQQ"
 CONTRACT_SIZE    = 100
 HEDGE_LEVELS     = [0.70, 0.85, 1.00]
-BUFFER_PCT       = 0.001          # 0.1 %
-TAKE_PROFIT_PCT  = 0.75           # 75 %
-STOP_LOSS_PCT    = 0.90           # 90 %
+BUFFER_PCT       = 0.001          # 0.1 %
+TAKE_PROFIT_PCT  = 0.75           # 75 %
+STOP_LOSS_PCT    = 0.90           # 90 %
 MAX_HEDGE_SHARES = 100
 FAILSAFE_ET      = (15, 40)       # 15:40 ET
 
@@ -68,11 +68,17 @@ def _get(url: str, params: Dict | None = None):
 
 def _post(url: str, data: Dict):
     r = requests.post(url, headers=HEADERS, data=data)
+    if not r.ok:
+        logging.error("HTTP %d: %s", r.status_code, r.text)
     r.raise_for_status()
     return r.json()
 
 def market_clock() -> Dict:
     return _get(f"{BASE_URL}/markets/clock")["clock"]
+
+def option_expirations(symbol: str) -> List[str]:
+    """Get available expiration dates for the given symbol."""
+    return _get(f"{BASE_URL}/markets/options/expirations", {"symbol": symbol})["expirations"]["date"]
 
 def latest_quote(symbol: str, greeks: bool = False) -> Dict:
     return _get(
@@ -81,10 +87,19 @@ def latest_quote(symbol: str, greeks: bool = False) -> Dict:
     )["quotes"]["quote"]
 
 def option_chain(symbol: str, expiration: str) -> List[Dict]:
-    return _get(
-        f"{BASE_URL}/markets/options/chains",
-        {"symbol": symbol, "expiration": expiration, "greeks": "true"},
-    )["options"]["option"]
+    """Get option chain for symbol and expiration. Handles null response."""
+    try:
+        response = _get(
+            f"{BASE_URL}/markets/options/chains",
+            {"symbol": symbol, "expiration": expiration, "greeks": "true"},
+        )
+        options = response.get("options")
+        if options is None or options.get("option") is None:
+            raise ValueError(f"No options available for {symbol} expiration {expiration}")
+        return options["option"]
+    except Exception as e:
+        logging.error("Failed to get option chain: %s", e)
+        raise
 
 def place_order(symbol: str, qty: int, side: str,
                 op_class: str = "equity", option_symbol: str | None = None):
@@ -107,13 +122,39 @@ def wait_until(dt_target: datetime):
         time.sleep(1)
 
 def nearest_strike(price: float) -> int:
+    """Round to the closest whole dollar strike."""
     lower, upper = int(price), int(price) + 1
     return lower if abs(price - lower) < abs(price - upper) else upper
+
+def nearest_expiration() -> str:
+    """Get the nearest expiration date (>= today)."""
+    today = ET_now().date()
+    expirations = option_expirations(UNDERLYING)
+    
+    for exp_str in expirations:
+        exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+        if exp_date >= today:
+            return exp_str
+    
+    raise ValueError("No suitable expiration found")
+
+def make_symbol(option_type: str, strike: int, expiration: str) -> str:
+    """Build 21-character Tradier option symbol: QQQ YYMMDD C/P strike×1000."""
+    exp_formatted = expiration.replace('-', '')[2:]  # YYMMDD
+    strike_formatted = f"{strike * 1000:06d}"  # 6 digits, multiply by 1000
+    return f"{UNDERLYING}{exp_formatted}{option_type.upper()}{strike_formatted}"
 
 # ─────────────── BUILD & OPEN IRON CONDOR ────────────────
 
 def build_iron_condor(today: str) -> Dict:
-    chain = option_chain(UNDERLYING, today)
+    try:
+        chain = option_chain(UNDERLYING, today)
+    except ValueError:
+        # If daily expiry doesn't exist, try nearest available
+        logging.warning("Daily expiry not available, using nearest expiration")
+        today = nearest_expiration()
+        chain = option_chain(UNDERLYING, today)
+    
     spot  = latest_quote(UNDERLYING)["last"]
     atm   = nearest_strike(spot)
 
@@ -125,9 +166,14 @@ def build_iron_condor(today: str) -> Dict:
     lc, lp = sc + 7, sp - 7                         # long call / put
     logging.info("Strikes SC %d SP %d LC %d LP %d | credit≈%.2f", sc, sp, lc, lp, prem*2)
 
-    fmt = lambda t, k: f"{UNDERLYING}{today.replace('-', '')[2:]}{t}{k:08d}"
-    legs = [(fmt("C", sc*100), "sell"), (fmt("P", sp*100), "sell"),
-            (fmt("C", lc*100), "buy"),  (fmt("P", lp*100), "buy")]
+    # Build option symbols using the corrected format
+    legs = [
+        (make_symbol("C", sc, today), "sell"),
+        (make_symbol("P", sp, today), "sell"),
+        (make_symbol("C", lc, today), "buy"),
+        (make_symbol("P", lp, today), "buy")
+    ]
+    
     for sym, side in legs:
         place_order(UNDERLYING, 1, side, "option", sym)
         trade_log.append(Trade(UNDERLYING, side.upper(), 1, 0.0, "option", sym, today))
@@ -203,7 +249,7 @@ def main():
     else:
         next_open = datetime.fromisoformat(clock["next_change"]).astimezone(ET)
 
-    entry_time = next_open.replace(hour=13, minute=49, second=0, microsecond=0)
+    entry_time = next_open.replace(hour=9, minute=33, second=0, microsecond=0)
     logging.info("Waiting until entry time %s", entry_time.strftime("%H:%M:%S"))
     wait_until(entry_time)
 
