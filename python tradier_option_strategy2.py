@@ -1,13 +1,13 @@
 """
-QQQM Iron‑Condor bot – Tradier sandbox (paper) account
+SPX Iron‑Condor bot – Tradier sandbox (paper) account
 ----------------------------------------------------
-• פותח איירון‑קונדו יומי 3 דקות לאחר פתיחת השוק (09:33 ET)
-• גידור דלתא במניות QQQM לפי רמות Δ 0.70 → 0.85 → 1.00 (עד 100 מניות)
-• סגירה אוטומטית ברווח ≥ 75 % או הפסד ≥ 90 % מהקרדיט הראשוני
-• Fail‑Safe: סגירה גורפת ב‑15:40 ET
+• פותח איירון‑קונדו מיד עם הפעלת הקוד
+• גידור דלתא במניות SPY לפי רמות Δ 0.70 → 0.85 → 1.00 (עד 100 מניות)
+• סגירה אוטומטית ברווח ≥ 75 % או הפסד ≥ 90 % מהקרדיט הראשוני
+• Fail‑Safe: סגירה גורפת ב‑15:40 ET
 • יומן עסקאות נשמר בזיכרון בלבד (trade_log)
 
-‒ נכתב עבור חשבון הסאנדבוקס של Tradier – החלף TOKEN ו‑ACCOUNT_ID לחשבון Live.
+‒ נכתב עבור חשבון הסאנדבוקס של Tradier – החלף TOKEN ו‑ACCOUNT_ID לחשבון Live.
 """
 
 from __future__ import annotations
@@ -25,12 +25,13 @@ TOKEN      = "MeZYc0JGI4iFdTeGUA4mv6JsTAYd"  # sandbox
 BASE_URL   = "https://sandbox.tradier.com/v1"
 HEADERS    = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/json"}
 
-UNDERLYING       = "QQQM"
+UNDERLYING       = "SPX"
+HEDGE_SYMBOL     = "SPY"  # נגדר SPY כי SPX הוא אינדקס שלא ניתן לקנות ישירות
 CONTRACT_SIZE    = 100
 HEDGE_LEVELS     = [0.70, 0.85, 1.00]
-BUFFER_PCT       = 0.001          # 0.1 %
-TAKE_PROFIT_PCT  = 0.75           # 75 %
-STOP_LOSS_PCT    = 0.90           # 90 %
+BUFFER_PCT       = 0.001          # 0.1 %
+TAKE_PROFIT_PCT  = 0.75           # 75 %
+STOP_LOSS_PCT    = 0.90           # 90 %
 MAX_HEDGE_SHARES = 100
 FAILSAFE_ET      = (15, 40)       # 15:40 ET
 
@@ -68,23 +69,60 @@ def _get(url: str, params: Dict | None = None):
 
 def _post(url: str, data: Dict):
     r = requests.post(url, headers=HEADERS, data=data)
+    if not r.ok:
+        logging.error("HTTP %d: %s", r.status_code, r.text)
     r.raise_for_status()
     return r.json()
 
 def market_clock() -> Dict:
-    return _get(f"{BASE_URL}/markets/clock")["clock"]
+    """Get market clock, handle potential None or malformed responses."""
+    try:
+        response = _get(f"{BASE_URL}/markets/clock")
+        if response and "clock" in response and response["clock"]:
+            return response["clock"]
+        else:
+            logging.warning("Market clock returned empty response, assuming market is open")
+            return {"state": "open", "next_change": None}
+    except Exception as e:
+        logging.error("Failed to get market clock: %s", e)
+        return {"state": "open", "next_change": None}
+
+def option_expirations(symbol: str) -> List[str]:
+    """Get available expiration dates for the given symbol."""
+    return _get(f"{BASE_URL}/markets/options/expirations", {"symbol": symbol})["expirations"]["date"]
 
 def latest_quote(symbol: str, greeks: bool = False) -> Dict:
-    return _get(
+    response = _get(
         f"{BASE_URL}/markets/quotes",
         {"symbols": symbol, "greeks": str(greeks).lower()},
-    )["quotes"]["quote"]
+    )
+    quote = response["quotes"]["quote"]
+    
+    # Handle case where last price might be None
+    if quote.get("last") is None and quote.get("bid") and quote.get("ask"):
+        quote["last"] = (float(quote["bid"]) + float(quote["ask"])) / 2
+        logging.warning(f"No last price for {symbol}, using midpoint: {quote['last']}")
+    elif quote.get("last") is None:
+        # If we don't have bid/ask either, use a fallback
+        logging.error(f"No price data for {symbol}, using fallback")
+        quote["last"] = 4500.0 if symbol == "SPX" else 450.0  # Reasonable fallback prices
+    
+    return quote
 
 def option_chain(symbol: str, expiration: str) -> List[Dict]:
-    return _get(
-        f"{BASE_URL}/markets/options/chains",
-        {"symbol": symbol, "expiration": expiration, "greeks": "true"},
-    )["options"]["option"]
+    """Get option chain for symbol and expiration. Handles null response."""
+    try:
+        response = _get(
+            f"{BASE_URL}/markets/options/chains",
+            {"symbol": symbol, "expiration": expiration, "greeks": "true"},
+        )
+        options = response.get("options")
+        if options is None or options.get("option") is None:
+            raise ValueError(f"No options available for {symbol} expiration {expiration}")
+        return options["option"]
+    except Exception as e:
+        logging.error("Failed to get option chain: %s", e)
+        raise
 
 def place_order(symbol: str, qty: int, side: str,
                 op_class: str = "equity", option_symbol: str | None = None):
@@ -107,27 +145,72 @@ def wait_until(dt_target: datetime):
         time.sleep(1)
 
 def nearest_strike(price: float) -> int:
-    lower, upper = int(price), int(price) + 1
-    return lower if abs(price - lower) < abs(price - upper) else upper
+    """Round to the closest strike (SPX strikes are usually in 5s)."""
+    if price is None:
+        raise ValueError("Price cannot be None")
+    
+    price = float(price)  # Ensure it's a number
+    
+    # For SPX, round to nearest 5
+    step = 5
+    return round(price / step) * step
+
+def nearest_expiration() -> str:
+    """Get the nearest expiration date (>= today)."""
+    today = ET_now().date()
+    expirations = option_expirations(UNDERLYING)
+    
+    for exp_str in expirations:
+        exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+        if exp_date >= today:
+            return exp_str
+    
+    raise ValueError("No suitable expiration found")
+
+def make_symbol(option_type: str, strike: int, expiration: str) -> str:
+    """Build SPX option symbol: SPX YYMMDD C/P strike×1000."""
+    exp_formatted = expiration.replace('-', '')[2:]  # YYMMDD
+    strike_formatted = f"{strike * 1000:07d}"  # 7 digits for SPX (higher strikes)
+    return f"{UNDERLYING}{exp_formatted}{option_type.upper()}{strike_formatted}"
 
 # ─────────────── BUILD & OPEN IRON CONDOR ────────────────
 
 def build_iron_condor(today: str) -> Dict:
-    chain = option_chain(UNDERLYING, today)
+    try:
+        chain = option_chain(UNDERLYING, today)
+    except ValueError:
+        # If daily expiry doesn't exist, try nearest available
+        logging.warning("Daily expiry not available, using nearest expiration")
+        today = nearest_expiration()
+        chain = option_chain(UNDERLYING, today)
+    
     spot  = latest_quote(UNDERLYING)["last"]
     atm   = nearest_strike(spot)
 
-    call_atm = next(c for c in chain if c["strike"] == atm and c["option_type"] == "call")
-    put_atm  = next(p for p in chain if p["strike"] == atm and p["option_type"] == "put")
+    call_atm = next((c for c in chain if c["strike"] == atm and c["option_type"] == "call"), None)
+    put_atm  = next((p for p in chain if p["strike"] == atm and p["option_type"] == "put"), None)
+    
+    if not call_atm or not put_atm:
+        # If exact ATM not found, find closest
+        call_atm = min([c for c in chain if c["option_type"] == "call"], 
+                      key=lambda x: abs(x["strike"] - atm))
+        put_atm = min([p for p in chain if p["option_type"] == "put"], 
+                     key=lambda x: abs(x["strike"] - atm))
+    
     prem = (float(call_atm["ask"]) + float(put_atm["bid"])) / 2
 
     sc, sp = round(atm + prem), round(atm - prem)   # short call / put
-    lc, lp = sc + 7, sp - 7                         # long call / put
+    lc, lp = sc + 25, sp - 25                       # long call / put (wider for SPX)
     logging.info("Strikes SC %d SP %d LC %d LP %d | credit≈%.2f", sc, sp, lc, lp, prem*2)
 
-    fmt = lambda t, k: f"{UNDERLYING}{today.replace('-', '')[2:]}{t}{k:08d}"
-    legs = [(fmt("C", sc*100), "sell"), (fmt("P", sp*100), "sell"),
-            (fmt("C", lc*100), "buy"),  (fmt("P", lp*100), "buy")]
+    # Build option symbols using the corrected format
+    legs = [
+        (make_symbol("C", sc, today), "sell"),
+        (make_symbol("P", sp, today), "sell"),
+        (make_symbol("C", lc, today), "buy"),
+        (make_symbol("P", lp, today), "buy")
+    ]
+    
     for sym, side in legs:
         place_order(UNDERLYING, 1, side, "option", sym)
         trade_log.append(Trade(UNDERLYING, side.upper(), 1, 0.0, "option", sym, today))
@@ -152,6 +235,8 @@ def total_delta(quotes: Dict[str, Dict]) -> float:
     for t in trade_log:
         if t.asset_type != "option":
             continue
+        if t.option_symbol not in quotes:
+            continue
         g = quotes[t.option_symbol].get("greeks")
         if not g or g.get("delta") is None:
             continue
@@ -168,19 +253,23 @@ def hedge_to(target_delta: float, quotes: Dict[str, Dict]):
         return
     need = max(-MAX_HEDGE_SHARES, min(MAX_HEDGE_SHARES, need))
     side = "buy" if need > 0 else "sell"
-    place_order(UNDERLYING, abs(need), side)
-    trade_log.append(Trade(UNDERLYING, side.upper(), abs(need), quotes[UNDERLYING]["last"], "stock"))
+    place_order(HEDGE_SYMBOL, abs(need), side)  # Use SPY for hedging
+    trade_log.append(Trade(HEDGE_SYMBOL, side.upper(), abs(need), quotes[HEDGE_SYMBOL]["last"], "stock"))
     logging.info("Δ_now %.2f → hedge %s %d shares", total_delta(quotes), side.upper(), abs(need))
 
 def calc_pl(quotes: Dict[str, Dict], credit: float) -> float:
     pl = 0.0
     for t in trade_log:
         if t.asset_type == "option":
+            if t.option_symbol not in quotes:
+                continue
             q = quotes[t.option_symbol]
             mkt = float(q["ask"] if t.side == "SELL" else q["bid"])
             pl += (t.price - mkt if t.side == "SELL" else mkt - t.price) * CONTRACT_SIZE
         else:
-            mkt = quotes[UNDERLYING]["last"]
+            if t.symbol not in quotes:
+                continue
+            mkt = quotes[t.symbol]["last"]
             pl += (mkt - t.price if t.side == "BUY" else t.price - mkt)
     return pl / credit if credit else 0.0
 
@@ -191,22 +280,14 @@ def close_all_positions():
         if t.asset_type == "option":
             place_order(UNDERLYING, t.qty, rev_side, "option", t.option_symbol)
         else:
-            place_order(UNDERLYING, t.qty, rev_side)
+            place_order(t.symbol, t.qty, rev_side)
         trade_log.remove(t)
 
 # ─────────────────────── MAIN LOOP ───────────────────────
 
 def main():
-    clock = market_clock()
-    if clock["state"] == "open":
-        next_open = ET_now()
-    else:
-        next_open = datetime.fromisoformat(clock["next_change"]).astimezone(ET)
-
-    entry_time = next_open.replace(hour=13, minute=49, second=0, microsecond=0)
-    logging.info("Waiting until entry time %s", entry_time.strftime("%H:%M:%S"))
-    wait_until(entry_time)
-
+    logging.info("Starting SPX Iron Condor bot - opening position immediately")
+    
     today = ET_now().date().isoformat()
     ctx = build_iron_condor(today)
     up_BE, dn_BE, credit = ctx["upper_be"], ctx["lower_be"], ctx["credit"]
@@ -220,7 +301,8 @@ def main():
             close_all_positions()
             break
 
-        syms = {UNDERLYING}.union({t.option_symbol for t in trade_log if t.asset_type == "option"})
+        # Include both SPX and SPY in quotes
+        syms = {UNDERLYING, HEDGE_SYMBOL}.union({t.option_symbol for t in trade_log if t.asset_type == "option"})
         quotes = update_quotes(list(syms))
         spot = quotes[UNDERLYING]["last"]
         delta = total_delta(quotes)
