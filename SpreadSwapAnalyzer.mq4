@@ -226,6 +226,13 @@ double CalculateSwapInUSD(double swapValue, int swapMode, double tickValue, doub
 //+------------------------------------------------------------------+
 int GetTripleSwapDay(string symbol)
 {
+    // נסה לזהות אוטומטית את יום הריבית המשולשת
+    int detectedDay = DetectTripleSwapDay(symbol);
+    
+    if(detectedDay >= 0)
+        return detectedDay;
+    
+    // אם לא הצלחנו לזהות, נשתמש בברירת מחדל
     // ברוב הברוקרים:
     // צמדי מט"ח ומתכות - רביעי (3)
     // מדדים ומניות - חמישי (4) או שישי (5)
@@ -239,6 +246,89 @@ int GetTripleSwapDay(string symbol)
     // למדדים ומניות - בדרך כלל חמישי
     // ניתן להתאים לפי הברוקר הספציפי
     return 4; // חמישי
+}
+
+//+------------------------------------------------------------------+
+//| זיהוי אוטומטי של יום הריבית המשולשת                           |
+//+------------------------------------------------------------------+
+int DetectTripleSwapDay(string symbol)
+{
+    // שמירת הנתונים הנוכחיים
+    double currentSwapLong = MarketInfo(symbol, MODE_SWAPLONG);
+    double currentSwapShort = MarketInfo(symbol, MODE_SWAPSHORT);
+    
+    // אם אין ריבית כלל, אין טעם לבדוק
+    if(currentSwapLong == 0 && currentSwapShort == 0)
+        return -1;
+    
+    // נבדוק את היסטוריית הריביות בימים האחרונים
+    // MT4 לא מספק גישה ישירה להיסטוריה של swap לפי יום
+    // אבל יש דרך עקיפה - לבדוק את הערך הנוכחי ולהשוות
+    
+    // בדיקה לפי הערך - אם הריבית הנוכחית גבוהה באופן חריג
+    double avgSwap = MathAbs(currentSwapLong) > MathAbs(currentSwapShort) ? 
+                     MathAbs(currentSwapLong) : MathAbs(currentSwapShort);
+    
+    // אם היום הנוכחי הוא יום עם ריבית משולשת, הערך יהיה גבוה יותר
+    int currentDayOfWeek = DayOfWeek();
+    
+    // שמירת המידע לקובץ לצורך למידה
+    string filename = "SwapData_" + symbol + ".csv";
+    int fileHandle = FileOpen(filename, FILE_READ|FILE_WRITE|FILE_CSV, ",");
+    
+    if(fileHandle != INVALID_HANDLE)
+    {
+        FileSeek(fileHandle, 0, SEEK_END);
+        FileWrite(fileHandle, TimeToString(TimeCurrent(), TIME_DATE), 
+                  currentDayOfWeek, currentSwapLong, currentSwapShort);
+        FileClose(fileHandle);
+    }
+    
+    // נסיון לקרוא נתונים היסטוריים ולזהות דפוס
+    fileHandle = FileOpen(filename, FILE_READ|FILE_CSV, ",");
+    if(fileHandle != INVALID_HANDLE)
+    {
+        double maxSwapDay[7] = {0,0,0,0,0,0,0};
+        int countDay[7] = {0,0,0,0,0,0,0};
+        
+        while(!FileIsEnding(fileHandle))
+        {
+            string date = FileReadString(fileHandle);
+            int day = (int)FileReadNumber(fileHandle);
+            double swapLong = FileReadNumber(fileHandle);
+            double swapShort = FileReadNumber(fileHandle);
+            
+            if(day >= 0 && day < 7)
+            {
+                double maxSwap = MathMax(MathAbs(swapLong), MathAbs(swapShort));
+                if(maxSwap > maxSwapDay[day])
+                    maxSwapDay[day] = maxSwap;
+                countDay[day]++;
+            }
+        }
+        FileClose(fileHandle);
+        
+        // חיפוש היום עם הריבית הגבוהה ביותר
+        double maxValue = 0;
+        int tripleDay = -1;
+        
+        for(int i = 0; i < 7; i++)
+        {
+            if(countDay[i] > 0 && maxSwapDay[i] > maxValue * 2.5)
+            {
+                maxValue = maxSwapDay[i];
+                tripleDay = i;
+            }
+        }
+        
+        if(tripleDay >= 0)
+        {
+            Print("זוהה יום ריבית משולשת עבור ", symbol, ": ", GetDayName(tripleDay));
+            return tripleDay;
+        }
+    }
+    
+    return -1; // לא זוהה
 }
 
 //+------------------------------------------------------------------+
