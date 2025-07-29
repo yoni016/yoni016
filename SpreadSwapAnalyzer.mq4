@@ -74,15 +74,13 @@ void OnStart()
             profitablePairs += StringFormat("%d. %s\n", profitableCount, symbol);
             profitablePairs += StringFormat("   כיוון: %s\n", swapType);
             profitablePairs += StringFormat("   עלות ספרד: $%.2f\n", spreadCostUSD);
-            profitablePairs += StringFormat("   ריבית יומית ממוצעת: $%.2f\n", swapValueUSD);
+            profitablePairs += StringFormat("   ריבית יומית: $%.2f\n", swapValueUSD);
             
-            // חישוב הריבית לפני הממוצע (ריבית רגילה)
-            double dailySwapBeforeAvg = swapValueUSD * 7.0 / 8.0; // חישוב הפוך מהממוצע
+            // קבלת היום עם ריבית משולשת
             int tripleDay = GetTripleSwapDay(symbol);
             string dayName = GetDayName(tripleDay);
             
-            profitablePairs += StringFormat("   ריבית ביום רגיל: $%.2f\n", dailySwapBeforeAvg);
-            profitablePairs += StringFormat("   ריבית ב%s (x3): $%.2f\n", dayName, dailySwapBeforeAvg * 3);
+            profitablePairs += StringFormat("   ריבית ב%s (x3): $%.2f\n", dayName, swapValueUSD * 3);
             profitablePairs += StringFormat("   יחס ריבית/ספרד: %.2f\n", swapValueUSD / spreadCostUSD);
             profitablePairs += "\n";
         }
@@ -219,31 +217,8 @@ double CalculateSwapInUSD(double swapValue, int swapMode, double tickValue, doub
             baseSwapUSD = 0;
     }
     
-    // חישוב הממוצע היומי כולל הריבית המשולשת
-    return CalculateDailyAverageSwap(baseSwapUSD, symbol);
-}
-
-//+------------------------------------------------------------------+
-//| חישוב ממוצע יומי של הסוואפ כולל ימים עם ריבית משולשת        |
-//+------------------------------------------------------------------+
-double CalculateDailyAverageSwap(double dailySwap, string symbol)
-{
-    // קבלת היום שבו יש ריבית משולשת
-    int tripleSwapDay = GetTripleSwapDay(symbol);
-    
-    if(tripleSwapDay == -1)
-    {
-        // אין יום עם ריבית משולשת
-        return dailySwap;
-    }
-    
-    // חישוב הממוצע השבועי
-    // 5 ימים רגילים + יום אחד עם ריבית משולשת (שזה עוד 2 ימים)
-    // סה"כ: 5 + 3 = 8 ימי ריבית ב-7 ימים
-    double weeklySwap = (5 * dailySwap) + (3 * dailySwap);
-    double averageDailySwap = weeklySwap / 7.0;
-    
-    return averageDailySwap;
+    // מחזירים את הריבית היומית הרגילה (ללא ממוצע)
+    return baseSwapUSD;
 }
 
 //+------------------------------------------------------------------+
