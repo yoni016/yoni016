@@ -61,26 +61,7 @@ void OnStart()
         // חישוב הריבית בדולרים
         // הסוואפ ב-MT4 יכול להיות בנקודות או באחוזים
         int swapMode = (int)MarketInfo(symbol, MODE_SWAPTYPE);
-        double swapValueUSD = 0;
-        
-        switch(swapMode)
-        {
-            case 0: // In points
-                swapValueUSD = positiveSwap * tickValue;
-                break;
-                
-            case 1: // In base currency
-                swapValueUSD = positiveSwap;
-                break;
-                
-            case 2: // By interest
-                swapValueUSD = contractSize * MarketInfo(symbol, MODE_BID) * positiveSwap / 100 / 360;
-                break;
-                
-            case 3: // In margin currency
-                swapValueUSD = positiveSwap;
-                break;
-        }
+        double swapValueUSD = CalculateSwapInUSD(positiveSwap, swapMode, tickValue, contractSize, MarketInfo(symbol, MODE_BID), symbol);
         
         // בדיקה האם עלות הספרד קטנה פי 2 מהחזר הריבית
         if(spreadCostUSD < (swapValueUSD / 2.0) && swapValueUSD > 0)
@@ -157,8 +138,8 @@ void AnalyzeSinglePair(string symbol)
     
     // חישוב הסוואפ לכל כיוון
     int swapMode = (int)MarketInfo(symbol, MODE_SWAPTYPE);
-    double swapLongUSD = CalculateSwapInUSD(swapLong, swapMode, tickValue, contractSize, bid);
-    double swapShortUSD = CalculateSwapInUSD(swapShort, swapMode, tickValue, contractSize, bid);
+    double swapLongUSD = CalculateSwapInUSD(swapLong, swapMode, tickValue, contractSize, bid, symbol);
+    double swapShortUSD = CalculateSwapInUSD(swapShort, swapMode, tickValue, contractSize, bid, symbol);
     
     // הדפסת הניתוח המפורט
     string analysis = StringFormat("\nניתוח מפורט עבור %s:\n", symbol);
@@ -187,7 +168,7 @@ void AnalyzeSinglePair(string symbol)
 //+------------------------------------------------------------------+
 //| חישוב הסוואפ בדולרים לפי סוג החישוב                           |
 //+------------------------------------------------------------------+
-double CalculateSwapInUSD(double swapValue, int swapMode, double tickValue, double contractSize, double price)
+double CalculateSwapInUSD(double swapValue, int swapMode, double tickValue, double contractSize, double price, string symbol)
 {
     switch(swapMode)
     {
@@ -195,16 +176,69 @@ double CalculateSwapInUSD(double swapValue, int swapMode, double tickValue, doub
             return swapValue * tickValue;
             
         case 1: // In base currency
-            return swapValue;
+            // הריבית ניתנת במטבע הבסיס, צריך להמיר ל-USD
+            // לדוגמה: ב-CADJPY הריבית תהיה ב-CAD וצריך להמיר לדולר
+            string baseCurrency = StringSubstr(symbol, 0, 3);
             
-        case 2: // By interest
+            // אם מטבע הבסיס הוא כבר USD, אין צורך בהמרה
+            if(baseCurrency == "USD")
+                return swapValue;
+            
+            // אחרת, נמיר למטבע החשבון (בדרך כלל USD)
+            // נחפש את שער ההמרה
+            double conversionRate = GetConversionRate(baseCurrency);
+            return swapValue * conversionRate;
+            
+        case 2: // By interest (percentage)
+            // חישוב לפי אחוז שנתי
             return contractSize * price * swapValue / 100 / 360;
             
         case 3: // In margin currency
+            // הריבית במטבע המרג'ין (בדרך כלל USD)
             return swapValue;
             
         default:
             return 0;
     }
+}
+
+//+------------------------------------------------------------------+
+//| קבלת שער המרה למטבע החשבון                                    |
+//+------------------------------------------------------------------+
+double GetConversionRate(string baseCurrency)
+{
+    string accountCurrency = AccountCurrency();
+    
+    // אם מטבע הבסיס זהה למטבע החשבון
+    if(baseCurrency == accountCurrency)
+        return 1.0;
+    
+    // נסה למצוא צמד ישיר
+    string directPair = baseCurrency + accountCurrency;
+    if(MarketInfo(directPair, MODE_BID) > 0)
+        return MarketInfo(directPair, MODE_BID);
+    
+    // נסה צמד הפוך
+    string inversePair = accountCurrency + baseCurrency;
+    if(MarketInfo(inversePair, MODE_BID) > 0)
+        return 1.0 / MarketInfo(inversePair, MODE_BID);
+    
+    // אם מטבע החשבון הוא USD, נסה למצוא צמדים עם USD
+    if(accountCurrency == "USD")
+    {
+        // חיפוש XXXUSD
+        string pairWithUSD = baseCurrency + "USD";
+        if(MarketInfo(pairWithUSD, MODE_BID) > 0)
+            return MarketInfo(pairWithUSD, MODE_BID);
+            
+        // חיפוש USDXXX
+        string usdPair = "USD" + baseCurrency;
+        if(MarketInfo(usdPair, MODE_BID) > 0)
+            return 1.0 / MarketInfo(usdPair, MODE_BID);
+    }
+    
+    // אם לא נמצא, החזר 1 (אזהרה: זה לא מדויק)
+    Print("אזהרה: לא נמצא שער המרה עבור ", baseCurrency, " ל-", accountCurrency);
+    return 1.0;
 }
 //+------------------------------------------------------------------+
