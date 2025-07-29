@@ -8,6 +8,8 @@
 #property version   "1.00"
 #property strict
 
+#include "TripleSwapSettings.mqh"
+
 //+------------------------------------------------------------------+
 //| Script program start function                                    |
 //+------------------------------------------------------------------+
@@ -72,7 +74,15 @@ void OnStart()
             profitablePairs += StringFormat("%d. %s\n", profitableCount, symbol);
             profitablePairs += StringFormat("   כיוון: %s\n", swapType);
             profitablePairs += StringFormat("   עלות ספרד: $%.2f\n", spreadCostUSD);
-            profitablePairs += StringFormat("   ריבית יומית: $%.2f\n", swapValueUSD);
+            profitablePairs += StringFormat("   ריבית יומית ממוצעת: $%.2f\n", swapValueUSD);
+            
+            // חישוב הריבית לפני הממוצע (ריבית רגילה)
+            double dailySwapBeforeAvg = swapValueUSD * 7.0 / 8.0; // חישוב הפוך מהממוצע
+            int tripleDay = GetTripleSwapDay(symbol);
+            string dayName = GetDayName(tripleDay);
+            
+            profitablePairs += StringFormat("   ריבית ביום רגיל: $%.2f\n", dailySwapBeforeAvg);
+            profitablePairs += StringFormat("   ריבית ב%s (x3): $%.2f\n", dayName, dailySwapBeforeAvg * 3);
             profitablePairs += StringFormat("   יחס ריבית/ספרד: %.2f\n", swapValueUSD / spreadCostUSD);
             profitablePairs += "\n";
         }
@@ -170,10 +180,13 @@ void AnalyzeSinglePair(string symbol)
 //+------------------------------------------------------------------+
 double CalculateSwapInUSD(double swapValue, int swapMode, double tickValue, double contractSize, double price, string symbol)
 {
+    double baseSwapUSD = 0;
+    
     switch(swapMode)
     {
         case 0: // In points
-            return swapValue * tickValue;
+            baseSwapUSD = swapValue * tickValue;
+            break;
             
         case 1: // In base currency
             // הריבית ניתנת במטבע הבסיס, צריך להמיר ל-USD
@@ -182,23 +195,116 @@ double CalculateSwapInUSD(double swapValue, int swapMode, double tickValue, doub
             
             // אם מטבע הבסיס הוא כבר USD, אין צורך בהמרה
             if(baseCurrency == "USD")
-                return swapValue;
-            
-            // אחרת, נמיר למטבע החשבון (בדרך כלל USD)
-            // נחפש את שער ההמרה
-            double conversionRate = GetConversionRate(baseCurrency);
-            return swapValue * conversionRate;
+                baseSwapUSD = swapValue;
+            else
+            {
+                // אחרת, נמיר למטבע החשבון (בדרך כלל USD)
+                // נחפש את שער ההמרה
+                double conversionRate = GetConversionRate(baseCurrency);
+                baseSwapUSD = swapValue * conversionRate;
+            }
+            break;
             
         case 2: // By interest (percentage)
             // חישוב לפי אחוז שנתי
-            return contractSize * price * swapValue / 100 / 360;
+            baseSwapUSD = contractSize * price * swapValue / 100 / 360;
+            break;
             
         case 3: // In margin currency
             // הריבית במטבע המרג'ין (בדרך כלל USD)
-            return swapValue;
+            baseSwapUSD = swapValue;
+            break;
             
         default:
-            return 0;
+            baseSwapUSD = 0;
+    }
+    
+    // חישוב הממוצע היומי כולל הריבית המשולשת
+    return CalculateDailyAverageSwap(baseSwapUSD, symbol);
+}
+
+//+------------------------------------------------------------------+
+//| חישוב ממוצע יומי של הסוואפ כולל ימים עם ריבית משולשת        |
+//+------------------------------------------------------------------+
+double CalculateDailyAverageSwap(double dailySwap, string symbol)
+{
+    // קבלת היום שבו יש ריבית משולשת
+    int tripleSwapDay = GetTripleSwapDay(symbol);
+    
+    if(tripleSwapDay == -1)
+    {
+        // אין יום עם ריבית משולשת
+        return dailySwap;
+    }
+    
+    // חישוב הממוצע השבועי
+    // 5 ימים רגילים + יום אחד עם ריבית משולשת (שזה עוד 2 ימים)
+    // סה"כ: 5 + 3 = 8 ימי ריבית ב-7 ימים
+    double weeklySwap = (5 * dailySwap) + (3 * dailySwap);
+    double averageDailySwap = weeklySwap / 7.0;
+    
+    return averageDailySwap;
+}
+
+//+------------------------------------------------------------------+
+//| קבלת היום שבו יש ריבית משולשת                                |
+//+------------------------------------------------------------------+
+int GetTripleSwapDay(string symbol)
+{
+    // ברוב הברוקרים:
+    // צמדי מט"ח ומתכות - רביעי (3)
+    // מדדים ומניות - חמישי (4) או שישי (5)
+    
+    // בדיקה אם זה צמד מט"ח או מתכת
+    if(IsForexOrMetal(symbol))
+    {
+        return 3; // רביעי (0=ראשון, 1=שני, 2=שלישי, 3=רביעי)
+    }
+    
+    // למדדים ומניות - בדרך כלל חמישי
+    // ניתן להתאים לפי הברוקר הספציפי
+    return 4; // חמישי
+}
+
+//+------------------------------------------------------------------+
+//| בדיקה אם הסימבול הוא צמד מט"ח או מתכת                       |
+//+------------------------------------------------------------------+
+bool IsForexOrMetal(string symbol)
+{
+    // בדיקה למתכות
+    if(StringFind(symbol, "XAU") >= 0 || StringFind(symbol, "XAG") >= 0 || 
+       StringFind(symbol, "GOLD") >= 0 || StringFind(symbol, "SILVER") >= 0)
+        return true;
+    
+    // בדיקה לצמדי מט"ח - 6 תווים עם מטבעות מוכרים
+    if(StringLen(symbol) == 6)
+    {
+        string base = StringSubstr(symbol, 0, 3);
+        string quote = StringSubstr(symbol, 3, 3);
+        string currencies = "EUR,USD,GBP,JPY,CHF,CAD,AUD,NZD,SEK,NOK,DKK,PLN,HUF,CZK,TRY,ZAR,MXN,SGD,HKD,RUB,CNH,INR,KRW,BRL";
+        
+        if(StringFind(currencies, base) >= 0 && StringFind(currencies, quote) >= 0)
+            return true;
+    }
+    
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| המרת מספר יום לשם היום                                       |
+//+------------------------------------------------------------------+
+string GetDayName(int dayNumber)
+{
+    switch(dayNumber)
+    {
+        case 0: return "ראשון";
+        case 1: return "שני";
+        case 2: return "שלישי";
+        case 3: return "רביעי";
+        case 4: return "חמישי";
+        case 5: return "שישי";
+        case 6: return "שבת";
+        default: return "לא ידוע";
     }
 }
 
