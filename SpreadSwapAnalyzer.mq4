@@ -8,6 +8,11 @@
 #property version   "1.00"
 #property strict
 
+// הגדרת קבועים אם חסרים
+#ifndef SYMBOL_SWAP_ROLLOVER3DAYS
+    #define SYMBOL_SWAP_ROLLOVER3DAYS 40
+#endif
+
 #include "TripleSwapSettings.mqh"
 
 //+------------------------------------------------------------------+
@@ -226,26 +231,27 @@ double CalculateSwapInUSD(double swapValue, int swapMode, double tickValue, doub
 //+------------------------------------------------------------------+
 int GetTripleSwapDay(string symbol)
 {
-    // נסה לזהות אוטומטית את יום הריבית המשולשת
-    int detectedDay = DetectTripleSwapDay(symbol);
+    // שימוש בפקודה המובנית של MT4
+    int tripleSwapDay = (int)SymbolInfoInteger(symbol, SYMBOL_SWAP_ROLLOVER3DAYS);
     
-    if(detectedDay >= 0)
-        return detectedDay;
+    // בדיקה שהערך תקין
+    if(tripleSwapDay >= 0 && tripleSwapDay <= 6)
+    {
+        return tripleSwapDay;
+    }
     
-    // אם לא הצלחנו לזהות, נשתמש בברירת מחדל
-    // ברוב הברוקרים:
-    // צמדי מט"ח ומתכות - רביעי (3)
-    // מדדים ומניות - חמישי (4) או שישי (5)
+    // אם הפקודה לא החזירה ערך תקין, נסה דרך אחרת
+    // חלק מהברוקרים לא מממשים את הפונקציה הזו
     
-    // בדיקה אם זה צמד מט"ח או מתכת
+    // ברירת מחדל לפי סוג הסימבול
     if(IsForexOrMetal(symbol))
     {
         return 3; // רביעי (0=ראשון, 1=שני, 2=שלישי, 3=רביעי)
     }
-    
-    // למדדים ומניות - בדרך כלל חמישי
-    // ניתן להתאים לפי הברוקר הספציפי
-    return 4; // חמישי
+    else
+    {
+        return 4; // חמישי למדדים ומניות
+    }
 }
 
 //+------------------------------------------------------------------+

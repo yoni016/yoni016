@@ -7,6 +7,11 @@
 #property version   "1.00"
 #property strict
 
+// הגדרת קבועים אם חסרים
+#ifndef SYMBOL_SWAP_ROLLOVER3DAYS
+    #define SYMBOL_SWAP_ROLLOVER3DAYS 40
+#endif
+
 //+------------------------------------------------------------------+
 //| Script program start function                                    |
 //+------------------------------------------------------------------+
@@ -25,12 +30,16 @@ void OnStart()
     Print("ריבית Short נוכחית: ", swapShort);
     Print("סוג חישוב ריבית: ", GetSwapTypeName(swapType));
     
-    // בדיקה מתקדמת - חלק מהברוקרים מאפשרים גישה דרך SymbolInfoInteger
-    #ifdef __MQL5__
-        // ב-MQL5 יש גישה ישירה
-        ENUM_DAY_OF_WEEK tripleDay = (ENUM_DAY_OF_WEEK)SymbolInfoInteger(symbol, SYMBOL_SWAP_ROLLOVER3DAYS);
-        Print("יום ריבית משולשת (MQL5): ", EnumToString(tripleDay));
-    #endif
+    // בדיקה באמצעות הפקודה המובנית
+    int tripleSwapDay = (int)SymbolInfoInteger(symbol, SYMBOL_SWAP_ROLLOVER3DAYS);
+    if(tripleSwapDay >= 0 && tripleSwapDay <= 6)
+    {
+        Print("\n*** יום ריבית משולשת מהברוקר: ", GetDayNameHebrew(tripleSwapDay), " ***");
+    }
+    else
+    {
+        Print("\n*** הברוקר לא מספק מידע על יום ריבית משולשת ***");
+    }
     
     // בדיקה ידנית לפי ידע מוקדם על ברוקרים
     string brokerName = AccountCompany();
