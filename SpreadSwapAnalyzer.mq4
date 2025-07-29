@@ -20,9 +20,14 @@
 //+------------------------------------------------------------------+
 void OnStart()
 {
+    // בדיקת היום הנוכחי
+    int currentDay = DayOfWeek();
+    string currentDayName = GetDayName(currentDay);
+    
     // רשימת הזוגות המומלצים
     string profitablePairs = "זוגות מטבע רווחיים:\n";
-    profitablePairs += "========================\n\n";
+    profitablePairs += "========================\n";
+    profitablePairs += "היום: " + currentDayName + " (" + TimeToString(TimeCurrent(), TIME_DATE) + ")\n\n";
     
     int symbolsTotal = SymbolsTotal(true);
     int profitableCount = 0;
@@ -70,8 +75,16 @@ void OnStart()
         int swapMode = (int)MarketInfo(symbol, MODE_SWAPTYPE);
         double swapValueUSD = CalculateSwapInUSD(positiveSwap, swapMode, tickValue, contractSize, MarketInfo(symbol, MODE_BID), symbol);
         
+        // בדיקה אם היום הוא יום ריבית משולשת
+        int currentDay = DayOfWeek();
+        int tripleSwapDay = GetTripleSwapDay(symbol);
+        bool isTripleSwapToday = (currentDay == tripleSwapDay);
+        
+        // אם היום יש ריבית משולשת, נכפיל ב-3
+        double actualSwapToday = isTripleSwapToday ? swapValueUSD * 3 : swapValueUSD;
+        
         // בדיקה האם עלות הספרד קטנה פי 2 מהחזר הריבית
-        if(spreadCostUSD < (swapValueUSD / 2.0) && swapValueUSD > 0)
+        if(spreadCostUSD < (actualSwapToday / 2.0) && actualSwapToday > 0)
         {
             profitableCount++;
             
@@ -79,14 +92,23 @@ void OnStart()
             profitablePairs += StringFormat("%d. %s\n", profitableCount, symbol);
             profitablePairs += StringFormat("   כיוון: %s\n", swapType);
             profitablePairs += StringFormat("   עלות ספרד: $%.2f\n", spreadCostUSD);
-            profitablePairs += StringFormat("   ריבית יומית: $%.2f\n", swapValueUSD);
             
-            // קבלת היום עם ריבית משולשת
-            int tripleDay = GetTripleSwapDay(symbol);
-            string dayName = GetDayName(tripleDay);
+            if(isTripleSwapToday)
+            {
+                profitablePairs += StringFormat("   *** היום ריבית משולשת! ***\n");
+                profitablePairs += StringFormat("   ריבית להיום: $%.2f (x3)\n", actualSwapToday);
+            }
+            else
+            {
+                profitablePairs += StringFormat("   ריבית יומית רגילה: $%.2f\n", swapValueUSD);
+                string dayName = GetDayName(tripleSwapDay);
+                profitablePairs += StringFormat("   ריבית ב%s: $%.2f (x3)\n", dayName, swapValueUSD * 3);
+            }
             
-            profitablePairs += StringFormat("   ריבית ב%s (x3): $%.2f\n", dayName, swapValueUSD * 3);
-            profitablePairs += StringFormat("   יחס ריבית/ספרד: %.2f\n", swapValueUSD / spreadCostUSD);
+            // יחס הפוך - כמה דולר ריבית על כל דולר ספרד
+            double swapToSpreadRatio = actualSwapToday / spreadCostUSD;
+            profitablePairs += StringFormat("   יחס ריבית/ספרד: %.2f (מקבלים $%.2f ריבית על כל $1 ספרד)\n", 
+                                          swapToSpreadRatio, swapToSpreadRatio);
             profitablePairs += "\n";
         }
     }
